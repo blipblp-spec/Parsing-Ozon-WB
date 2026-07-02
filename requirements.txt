@@ -1,6 +1,5 @@
-flask
-beautifulsoup4
-requests
-matplotlib
-gunicorn
-waitress
+flask==3.0.0
+beautifulsoup4==4.12.2
+requests==2.31.0
+matplotlib==3.8.0
+gunicorn==21.2.0
