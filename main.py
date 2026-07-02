@@ -8,13 +8,22 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import io
 import base64
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+import time
 
 # --- СОЗДАЕМ ПРИЛОЖЕНИЕ ---
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-change-it'
 
-# --- ФАЙЛ ДЛЯ ХРАНЕНИЯ ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ ---
+# --- ФАЙЛЫ ДЛЯ ХРАНЕНИЯ ДАННЫХ ---
 DATA_FILE = 'users_data.json'
+HISTORY_FILE = 'price_history.json'
 
 
 def load_data():
@@ -29,9 +38,115 @@ def save_data(data):
         json.dump(data, f)
 
 
-# --- ПАРСИНГ ЦЕН ---
-def parse_price(url):
-    """Парсит цену с Ozon через requests"""
+def load_history():
+    if not os.path.exists(HISTORY_FILE):
+        return {}
+    with open(HISTORY_FILE, 'r') as f:
+        return json.load(f)
+
+
+def save_history(history):
+    with open(HISTORY_FILE, 'w') as f:
+        json.dump(history, f)
+
+
+def save_price_history(product_url, price, title):
+    """Сохраняет историю цен для товара"""
+    history = load_history()
+
+    if product_url not in history:
+        history[product_url] = {
+            'title': title,
+            'history': []
+        }
+
+    history[product_url]['history'].append({
+        'date': datetime.now().strftime('%Y-%m-%d %H:%M'),
+        'price': price
+    })
+
+    if len(history[product_url]['history']) > 30:
+        history[product_url]['history'] = history[product_url]['history'][-30:]
+
+    save_history(history)
+    return history[product_url]['history']
+
+
+# --- ПАРСИНГ OZON (через Selenium) ---
+def parse_price_ozon(url):
+    """Парсит цену с Ozon через Selenium (обход защиты)"""
+    options = Options()
+    options.add_argument('--headless=new')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--window-size=1920,1080')
+    options.add_experimental_option('excludeSwitches', ['enable-automation'])
+
+    driver = None
+    try:
+        # Для Render используем системный Chrome
+        if os.environ.get('RENDER'):
+            options.binary_location = '/usr/bin/google-chrome'
+            service = Service('/usr/local/bin/chromedriver')
+        else:
+            service = Service(ChromeDriverManager().install())
+
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.get(url)
+        time.sleep(3)
+
+        # Пробуем разные селекторы для цены
+        price_selectors = [
+            "span[data-testid='price']",
+            "span[itemprop='price']",
+            ".price-block__price",
+            "div[data-testid='price_block'] span",
+            ".product-price-value"
+        ]
+
+        price = None
+        for selector in price_selectors:
+            try:
+                element = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                )
+                price_text = element.text.strip()
+                if price_text:
+                    price_match = re.search(r'[\d\s,]+', price_text)
+                    if price_match:
+                        price = price_match.group().replace(' ', '').replace(',', '.')
+                        break
+            except:
+                continue
+
+        # Парсим название товара
+        title_selectors = ["h1", "[data-testid='product-title']", ".product-title"]
+        title = "Товар с Ozon"
+        for selector in title_selectors:
+            try:
+                element = driver.find_element(By.CSS_SELECTOR, selector)
+                title = element.text.strip()[:50]
+                break
+            except:
+                continue
+
+        if price:
+            return {'price': price, 'title': title, 'currency': '₽', 'source': 'Ozon'}
+        else:
+            return {'error': 'Цена не найдена. Попробуйте другой товар.'}
+
+    except Exception as e:
+        return {'error': f'Ошибка парсинга Ozon: {str(e)}'}
+    finally:
+        if driver:
+            driver.quit()
+
+
+# --- ПАРСИНГ WILDBERRIES ---
+def parse_price_wildberries(url):
+    """Парсит цену с Wildberries"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
@@ -40,8 +155,8 @@ def parse_price(url):
         soup = BeautifulSoup(response.text, 'html.parser')
 
         price_selectors = [
-            'span[itemprop="price"]',
-            '.price-block__price',
+            '.price-block__final-price',
+            '.product-price__value',
             '[data-testid="price"]'
         ]
 
@@ -52,24 +167,35 @@ def parse_price(url):
                 price_match = re.search(r'[\d\s]+', price_text)
                 if price_match:
                     price = price_match.group().replace(' ', '')
-                    return {'price': price, 'title': 'Товар с Ozon', 'currency': '₽'}
+                    title_selectors = ["h1", ".product-name"]
+                    title = "Товар с WB"
+                    for ts in title_selectors:
+                        title_elem = soup.select_one(ts)
+                        if title_elem:
+                            title = title_elem.text.strip()[:50]
+                            break
+                    return {'price': price, 'title': title, 'currency': '₽', 'source': 'Wildberries'}
 
-        return {'error': 'Цена не найдена. Попробуйте другой товар.'}
+        return {'error': 'Цена на Wildberries не найдена'}
     except Exception as e:
-        return {'error': f'Ошибка соединения: {str(e)}'}
+        return {'error': f'Ошибка WB: {str(e)}'}
 
 
 # --- ГЕНЕРАЦИЯ ГРАФИКА ---
-def generate_chart():
-    """Составляет демонстрационный график цен"""
-    dates = [(datetime.now() - timedelta(days=i)).strftime('%d.%m') for i in range(6, -1, -1)]
-    prices = [1500, 1480, 1520, 1490, 1450, 1470, 1510]
+def generate_chart_from_history(history):
+    """Генерирует график из реальной истории цен"""
+    if not history or len(history) < 2:
+        dates = [(datetime.now() - timedelta(days=i)).strftime('%d.%m') for i in range(6, -1, -1)]
+        prices = [1500, 1480, 1520, 1490, 1450, 1470, 1510]
+    else:
+        dates = [item['date'] for item in history]
+        prices = [float(item['price']) for item in history]
 
     plt.figure(figsize=(10, 4))
     plt.plot(dates, prices, marker='o', color='#ff6b6b', linewidth=2)
-    plt.title('Динамика цены за неделю', fontsize=14)
+    plt.title('Динамика цены', fontsize=14)
     plt.grid(visible=True, alpha=0.3)
-    plt.xticks(rotation=45)
+    plt.xticks(rotation=45, fontsize=8)
     plt.tight_layout()
 
     buf = io.BytesIO()
@@ -87,7 +213,7 @@ HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Аналитик цен Ozon</title>
+    <title>Аналитик цен Ozon и WB</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }
@@ -97,6 +223,9 @@ HTML = """
         .btn-premium { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; border: none; }
         .btn-premium:hover { transform: scale(1.05); color: white; }
         .result-card { animation: fadeIn 0.5s; }
+        .source-badge { font-size: 0.8rem; padding: 3px 10px; border-radius: 20px; }
+        .source-ozon { background: #e8f5e9; color: #2e7d32; }
+        .source-wb { background: #e3f2fd; color: #0d47a1; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
@@ -106,8 +235,8 @@ HTML = """
     </div>
 
     <div class="card-custom">
-        <h1 class="text-center mb-3">📊 Аналитик цен Ozon</h1>
-        <p class="text-center text-muted">Вставьте ссылку на товар и узнайте цену за 2 секунды</p>
+        <h1 class="text-center mb-3">📊 Аналитик цен</h1>
+        <p class="text-center text-muted">Вставьте ссылку на товар с Ozon или Wildberries</p>
 
         <form method="POST" class="mt-4">
             <div class="input-group input-group-lg">
@@ -118,7 +247,14 @@ HTML = """
 
         {% if result %}
         <div class="result-card mt-4 p-4 bg-light rounded">
-            <h5>{{ result.title }}</h5>
+            <div class="d-flex justify-content-between align-items-start">
+                <h5>{{ result.title }}</h5>
+                {% if result.source %}
+                <span class="source-badge {% if result.source == 'Ozon' %}source-ozon{% else %}source-wb{% endif %}">
+                    {{ result.source }}
+                </span>
+                {% endif %}
+            </div>
             <div class="price">{{ result.price }} <span class="fs-5 text-muted">{{ result.currency }}</span></div>
             {% if result.error %}
             <div class="alert alert-danger mt-3">{{ result.error }}</div>
@@ -174,14 +310,23 @@ def index():
         if user['requests'] >= free_limit and not user['premium']:
             result = {'error': '❌ Лимит закончился. Купите Премиум!'}
         else:
-            parsed = parse_price(url)
+            if 'ozon.ru' in url.lower():
+                parsed = parse_price_ozon(url)
+            elif 'wildberries.ru' in url.lower():
+                parsed = parse_price_wildberries(url)
+            else:
+                parsed = {'error': 'Поддерживаются только Ozon и Wildberries'}
 
             if 'error' not in parsed:
                 user['requests'] += 1
                 save_data(data)
-                chart_img = generate_chart()
+                history = save_price_history(url, parsed['price'], parsed['title'])
+                chart_img = generate_chart_from_history(history)
                 result = parsed
-                result['price'] = f"{int(result['price']):,}".replace(',', ' ')
+                try:
+                    result['price'] = f"{int(float(result['price'])):,}".replace(',', ' ')
+                except:
+                    pass
             else:
                 result = parsed
 
@@ -229,6 +374,7 @@ def premium():
     """
 
 
-# --- ЗАПУСК ПРИЛОЖЕНИЯ ---
+# --- ЗАПУСК ---
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=False, host='0.0.0.0', port=port)
