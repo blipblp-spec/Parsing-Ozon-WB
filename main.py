@@ -8,15 +8,6 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import io
 import base64
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-import chromedriver_autoinstaller
-import time
 
 # --- СОЗДАЕМ ПРИЛОЖЕНИЕ ---
 app = Flask(__name__)
@@ -73,79 +64,43 @@ def save_price_history(product_url, price, title):
     return history[product_url]['history']
 
 
-# --- ПАРСИНГ OZON (через Selenium) ---
+# --- ПАРСИНГ OZON (через requests) ---
 def parse_price_ozon(url):
-    """Парсит цену с Ozon через Selenium (обход защиты)"""
-    options = Options()
-    options.add_argument('--headless=new')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-blink-features=AutomationControlled')
-    options.add_argument('--disable-gpu')
-    options.add_argument('--window-size=1920,1080')
-    options.add_experimental_option('excludeSwitches', ['enable-automation'])
-
-    driver = None
+    """Парсит цену с Ozon через requests"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
     try:
-        # Для Render используем системный Chrome
-        if os.environ.get('RENDER'):
-            options.binary_location = '/usr/bin/google-chrome'
-            # Автоматически устанавливаем ChromeDriver
-            chromedriver_autoinstaller.install()
-            service = Service()
-        else:
-            service = Service(ChromeDriverManager().install())
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
 
-        driver = webdriver.Chrome(service=service, options=options)
-        driver.get(url)
-        time.sleep(5)
-
-        # Пробуем разные селекторы для цены
+        # Ищем цену
         price_selectors = [
-            "span[data-testid='price']",
-            "span[itemprop='price']",
-            ".price-block__price",
-            "div[data-testid='price_block'] span",
-            ".product-price-value",
-            "span[data-testid='price_block']"
+            'span[itemprop="price"]',
+            '.price-block__price',
+            '[data-testid="price"]',
+            '.product-price-value'
         ]
 
-        price = None
         for selector in price_selectors:
-            try:
-                element = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                )
+            element = soup.select_one(selector)
+            if element:
                 price_text = element.text.strip()
-                if price_text:
-                    price_match = re.search(r'[\d\s,]+', price_text)
-                    if price_match:
-                        price = price_match.group().replace(' ', '').replace(',', '.')
-                        break
-            except:
-                continue
+                price_match = re.search(r'[\d\s]+', price_text)
+                if price_match:
+                    price = price_match.group().replace(' ', '')
+                    title_selectors = ["h1", ".product-title"]
+                    title = "Товар с Ozon"
+                    for ts in title_selectors:
+                        title_elem = soup.select_one(ts)
+                        if title_elem:
+                            title = title_elem.text.strip()[:50]
+                            break
+                    return {'price': price, 'title': title, 'currency': '₽', 'source': 'Ozon'}
 
-        # Парсим название товара
-        title_selectors = ["h1", "[data-testid='product-title']", ".product-title"]
-        title = "Товар с Ozon"
-        for selector in title_selectors:
-            try:
-                element = driver.find_element(By.CSS_SELECTOR, selector)
-                title = element.text.strip()[:50]
-                break
-            except:
-                continue
-
-        if price:
-            return {'price': price, 'title': title, 'currency': '₽', 'source': 'Ozon'}
-        else:
-            return {'error': 'Цена не найдена. Попробуйте другой товар.'}
-
+        return {'error': 'Цена не найдена. Попробуйте другой товар.'}
     except Exception as e:
-        return {'error': f'Ошибка парсинга Ozon: {str(e)}'}
-    finally:
-        if driver:
-            driver.quit()
+        return {'error': f'Ошибка парсинга: {str(e)}'}
 
 
 # --- ПАРСИНГ WILDBERRIES ---
