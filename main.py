@@ -57,12 +57,36 @@ def save_price_history(product_url, price, title):
 def parse_price_ozon(url):
     """Парсит цену с Ozon через API"""
     try:
-        import re
-        match = re.search(r'/product/(\d+)', url)
-        if not match:
-            return {'error': 'Неверный формат ссылки Ozon'}
+        # Пробуем извлечь ID разными способами
+        product_id = None
 
-        product_id = match.group(1)
+        # Способ 1: /product/1234567890
+        match = re.search(r'/product/(\d+)', url)
+        if match:
+            product_id = match.group(1)
+
+        # Способ 2: ?product_id=1234567890
+        if not product_id:
+            match = re.search(r'[?&]product_id=(\d+)', url)
+            if match:
+                product_id = match.group(1)
+
+        # Способ 3: просто любое число в URL
+        if not product_id:
+            match = re.search(r'/(\d{6,15})(?:\?|$)', url)
+            if match:
+                product_id = match.group(1)
+
+        # Способ 4: /id/1234567890
+        if not product_id:
+            match = re.search(r'/id/(\d+)', url)
+            if match:
+                product_id = match.group(1)
+
+        if not product_id:
+            return {'error': 'Не удалось найти ID товара в ссылке. Убедитесь, что ссылка правильная.'}
+
+        # Запрос к API Ozon
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'application/json'
@@ -70,12 +94,16 @@ def parse_price_ozon(url):
 
         api_url = f'https://api.ozon.ru/composer-api.bx/page/json/v2?url=/product/{product_id}'
         response = requests.get(api_url, headers=headers, timeout=10)
+
+        if response.status_code != 200:
+            return {'error': f'Ozon API вернул ошибку: {response.status_code}'}
+
         data = response.json()
 
         price = None
         title = "Товар с Ozon"
 
-        # Ищем цену в API ответе
+        # Ищем цену в ответе API
         try:
             if 'layout' in data:
                 for item in data['layout']:
@@ -86,6 +114,24 @@ def parse_price_ozon(url):
                         if 'data' in item and 'price' in item['data']:
                             price = str(item['data']['price'])
                             break
+
+            if not price and 'tracking' in data and 'product' in data['tracking']:
+                if 'price' in data['tracking']['product']:
+                    price = str(data['tracking']['product']['price'])
+
+            if not price:
+                json_str = json.dumps(data)
+                price_patterns = [
+                    r'"price"\s*:\s*"([\d.]+)"',
+                    r'"price"\s*:\s*([\d.]+)',
+                    r'"current_price"\s*:\s*"([\d.]+)"',
+                    r'"amount"\s*:\s*"([\d.]+)"'
+                ]
+                for pattern in price_patterns:
+                    match = re.search(pattern, json_str)
+                    if match:
+                        price = match.group(1)
+                        break
         except:
             pass
 
@@ -101,7 +147,9 @@ def parse_price_ozon(url):
                 'span[itemprop="price"]',
                 '.price-block__price',
                 '[data-testid="price"]',
-                '.product-price-value'
+                '.product-price-value',
+                '.price-amount',
+                '.product-price'
             ]
 
             for selector in price_selectors:
@@ -121,7 +169,7 @@ def parse_price_ozon(url):
                 }
                 response = requests.get(url, headers=headers, timeout=10)
                 soup = BeautifulSoup(response.text, 'html.parser')
-                title_selectors = ["h1", ".product-title"]
+                title_selectors = ["h1", ".product-title", ".title", "h1[itemprop='name']"]
                 for ts in title_selectors:
                     title_elem = soup.select_one(ts)
                     if title_elem:
@@ -133,6 +181,7 @@ def parse_price_ozon(url):
             return {'price': price, 'title': title, 'currency': '₽', 'source': 'Ozon'}
         else:
             return {'error': 'Цена не найдена. Попробуйте другой товар.'}
+
     except Exception as e:
         return {'error': f'Ошибка парсинга Ozon: {str(e)}'}
 
