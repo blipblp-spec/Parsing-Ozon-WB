@@ -15,6 +15,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+import chromedriver_autoinstaller
 import time
 
 # --- СОЗДАЕМ ПРИЛОЖЕНИЕ ---
@@ -89,13 +90,15 @@ def parse_price_ozon(url):
         # Для Render используем системный Chrome
         if os.environ.get('RENDER'):
             options.binary_location = '/usr/bin/google-chrome'
-            service = Service('/usr/local/bin/chromedriver')
+            # Автоматически устанавливаем ChromeDriver
+            chromedriver_autoinstaller.install()
+            service = Service()
         else:
             service = Service(ChromeDriverManager().install())
 
         driver = webdriver.Chrome(service=service, options=options)
         driver.get(url)
-        time.sleep(5)  # Увеличил время для загрузки
+        time.sleep(5)
 
         # Пробуем разные селекторы для цены
         price_selectors = [

@@ -5,3 +5,4 @@ matplotlib==3.8.0
 gunicorn==21.2.0
 selenium==4.20.0
 webdriver-manager==4.0.2
+chromedriver-autoinstaller==0.6.5
