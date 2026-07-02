@@ -95,7 +95,7 @@ def parse_price_ozon(url):
 
         driver = webdriver.Chrome(service=service, options=options)
         driver.get(url)
-        time.sleep(3)
+        time.sleep(5)  # Увеличил время для загрузки
 
         # Пробуем разные селекторы для цены
         price_selectors = [
@@ -103,13 +103,14 @@ def parse_price_ozon(url):
             "span[itemprop='price']",
             ".price-block__price",
             "div[data-testid='price_block'] span",
-            ".product-price-value"
+            ".product-price-value",
+            "span[data-testid='price_block']"
         ]
 
         price = None
         for selector in price_selectors:
             try:
-                element = WebDriverWait(driver, 5).until(
+                element = WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, selector))
                 )
                 price_text = element.text.strip()

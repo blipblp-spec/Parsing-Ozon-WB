@@ -26,5 +26,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копируем весь код
 COPY . .
 
+# Устанавливаем переменную окружения для Render
+ENV RENDER=true
+
 # Команда для запуска
 CMD ["gunicorn", "main:app", "-b", "0.0.0.0:8000"]
