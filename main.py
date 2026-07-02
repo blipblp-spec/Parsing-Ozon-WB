@@ -9,11 +9,9 @@ import matplotlib.pyplot as plt
 import io
 import base64
 
-# --- СОЗДАЕМ ПРИЛОЖЕНИЕ ---
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-change-it'
 
-# --- ФАЙЛЫ ДЛЯ ХРАНЕНИЯ ДАННЫХ ---
 DATA_FILE = 'users_data.json'
 HISTORY_FILE = 'price_history.json'
 
@@ -43,69 +41,103 @@ def save_history(history):
 
 
 def save_price_history(product_url, price, title):
-    """Сохраняет историю цен для товара"""
     history = load_history()
-
     if product_url not in history:
-        history[product_url] = {
-            'title': title,
-            'history': []
-        }
-
+        history[product_url] = {'title': title, 'history': []}
     history[product_url]['history'].append({
         'date': datetime.now().strftime('%Y-%m-%d %H:%M'),
         'price': price
     })
-
     if len(history[product_url]['history']) > 30:
         history[product_url]['history'] = history[product_url]['history'][-30:]
-
     save_history(history)
     return history[product_url]['history']
 
 
-# --- ПАРСИНГ OZON (через requests) ---
 def parse_price_ozon(url):
-    """Парсит цену с Ozon через requests"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
+    """Парсит цену с Ozon через API"""
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        import re
+        match = re.search(r'/product/(\d+)', url)
+        if not match:
+            return {'error': 'Неверный формат ссылки Ozon'}
 
-        # Ищем цену
-        price_selectors = [
-            'span[itemprop="price"]',
-            '.price-block__price',
-            '[data-testid="price"]',
-            '.product-price-value'
-        ]
+        product_id = match.group(1)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json'
+        }
 
-        for selector in price_selectors:
-            element = soup.select_one(selector)
-            if element:
-                price_text = element.text.strip()
-                price_match = re.search(r'[\d\s]+', price_text)
-                if price_match:
-                    price = price_match.group().replace(' ', '')
-                    title_selectors = ["h1", ".product-title"]
-                    title = "Товар с Ozon"
-                    for ts in title_selectors:
-                        title_elem = soup.select_one(ts)
-                        if title_elem:
-                            title = title_elem.text.strip()[:50]
+        api_url = f'https://api.ozon.ru/composer-api.bx/page/json/v2?url=/product/{product_id}'
+        response = requests.get(api_url, headers=headers, timeout=10)
+        data = response.json()
+
+        price = None
+        title = "Товар с Ozon"
+
+        # Ищем цену в API ответе
+        try:
+            if 'layout' in data:
+                for item in data['layout']:
+                    if 'price' in str(item).lower():
+                        if 'price' in item and 'value' in item['price']:
+                            price = str(item['price']['value'])
                             break
-                    return {'price': price, 'title': title, 'currency': '₽', 'source': 'Ozon'}
+                        if 'data' in item and 'price' in item['data']:
+                            price = str(item['data']['price'])
+                            break
+        except:
+            pass
 
-        return {'error': 'Цена не найдена. Попробуйте другой товар.'}
+        # Если цена не найдена через API, пробуем через HTML
+        if not price:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=10)
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            price_selectors = [
+                'span[itemprop="price"]',
+                '.price-block__price',
+                '[data-testid="price"]',
+                '.product-price-value'
+            ]
+
+            for selector in price_selectors:
+                element = soup.select_one(selector)
+                if element:
+                    price_text = element.text.strip()
+                    price_match = re.search(r'[\d\s]+', price_text)
+                    if price_match:
+                        price = price_match.group().replace(' ', '')
+                        break
+
+        if price:
+            # Получаем название товара
+            try:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                response = requests.get(url, headers=headers, timeout=10)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                title_selectors = ["h1", ".product-title"]
+                for ts in title_selectors:
+                    title_elem = soup.select_one(ts)
+                    if title_elem:
+                        title = title_elem.text.strip()[:50]
+                        break
+            except:
+                pass
+
+            return {'price': price, 'title': title, 'currency': '₽', 'source': 'Ozon'}
+        else:
+            return {'error': 'Цена не найдена. Попробуйте другой товар.'}
     except Exception as e:
-        return {'error': f'Ошибка парсинга: {str(e)}'}
+        return {'error': f'Ошибка парсинга Ozon: {str(e)}'}
 
 
-# --- ПАРСИНГ WILDBERRIES ---
 def parse_price_wildberries(url):
-    """Парсит цену с Wildberries"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
@@ -140,9 +172,7 @@ def parse_price_wildberries(url):
         return {'error': f'Ошибка WB: {str(e)}'}
 
 
-# --- ГЕНЕРАЦИЯ ГРАФИКА ---
 def generate_chart_from_history(history):
-    """Генерирует график из реальной истории цен"""
     if not history or len(history) < 2:
         dates = [(datetime.now() - timedelta(days=i)).strftime('%d.%m') for i in range(6, -1, -1)]
         prices = [1500, 1480, 1520, 1490, 1450, 1470, 1510]
@@ -165,7 +195,6 @@ def generate_chart_from_history(history):
     return img_base64
 
 
-# --- HTML ШАБЛОН ---
 HTML = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -246,7 +275,6 @@ HTML = """
 """
 
 
-# --- ГЛАВНАЯ СТРАНИЦА ---
 @app.route('/', methods=['GET', 'POST'])
 def index():
     user_id = session.get('user_id', 'anonymous')
@@ -298,7 +326,6 @@ def index():
     )
 
 
-# --- СТРАНИЦА ПРЕМИУМ ---
 @app.route('/premium')
 def premium():
     return """
@@ -333,7 +360,6 @@ def premium():
     """
 
 
-# --- ЗАПУСК ---
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
